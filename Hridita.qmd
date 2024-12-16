@@ -1,0 +1,256 @@
+---
+title: "Hridita - in advance rhythm change"
+format: html
+editor: visual
+---
+
+## Quarto
+
+```{r}
+library(data.table)
+library(dplyr)
+library(lubridate)
+library(cosinor2)
+library(car)
+library(olsrr)
+library(writexl)
+library(readxl)
+library(ggplot2)
+library(stringr)
+library(nortest)
+
+rm(list = ls())
+```
+
+## Rythms
+
+```{r}
+
+extract_rhythmic_features <- function(df, start_date, end_date, df_cosinor, bool_save, file_name, baseline_acro, baseline_p, baseline_dom_period, data_name) 
+{
+  df_subset <- subset(df, subset=c((Timestamp >= start_date) & (Timestamp < end_date))) # it will become [start date, end_date)
+  rhythmic_data = list(acro = default_value, p = default_value, rhythm_info = c(), dom_period = default_value)
+  
+  if (nrow(df_subset) > 7) # sample size must be greater than 7 to calculate the normality as per the req. of ad.test()
+  {
+      df_subset$time_in_24 = ifelse(df_subset$time_float < 1, df_subset$time_float+24, df_subset$time_float)
+      colnames(df_subset)[colnames(df_subset) == data_name] <- 'Data'
+      
+      tryCatch({
+            
+        if (length(unique(df_subset$Data)) > 1)
+        {
+            p_val <- ad.test(df_subset$Data)$p.value # ols_test_normality(my_model)[[1]][2] # [[1]][2] presents p value of Kolmogorov-Smirnov as I checked manually by this dataset and also by cars dataset
+            if (p_val < 0.05) # Rejected null hypothesis. So, data is not normally distributed :).
+            {
+                df_subset$Data = log(df_subset$Data + 1)
+            }
+            else # We do not have enough evidence to reject null hypothesis and data is normally distributed :(
+            {
+                df_subset$Data = df_subset$Data
+            }
+            
+            fit <- cosinor.lm(Data ~ time(time_in_24), data = df_subset, period = period_in_hour)
+    
+            s_fit <- summary(fit)
+            mesor <- s_fit[[1]]$estimate[1] # Transformed coef: s_fit[[1]]; estimate column; s_fit[[1]]['estimate'][[1]] returns the values in the estimate column; [1] value is the intercept as I found through investigation
+            ampli <- s_fit[[1]]$estimate[2]
+            df_detect <- as.data.frame(cosinor.detect(fit))
+    
+            output <- periodogram(data = t(df_subset$Data), time = df_subset$time_in_24, periods=1:24) # WARNING: why do we need to do the transpose operation t() here?
+            dominant_period <- which.max(unlist(c(output)$data))  # I checked it manually. MAJOR REMINDER: If you use the all periods (which is by default) given through (sheet_data$time_in_24), this will not work since the number of periods will be more 24 and indecies will not present the actual index
+            
+            if (!is.na(ampli))
+            {
+              corr_acro <- correct.acrophase(fit)
+              rhythmic_data$acro <- corr_acro
+              rhythmic_data$p <- df_detect$p
+              rhythmic_data$dom_period <- dominant_period[[1]]
+              
+              if(bool_save)
+              {
+                rhythmic_data$rhythm_info <- c(start_date, end_date, data_name, gsub('-', '', gsub(".csv.gz", '', file_name)),
+                                               mesor, ampli, corr_acro, df_detect$F, df_detect$p, dominant_period[[1]],
+                                               unlist(c(output)$data)[dominant_period][[1]], baseline_acro, baseline_p, baseline_dom_period)
+              }
+            }
+            
+            # output <- output + scale_color_manual(values=c('Yellow')) + theme(
+            #     axis.text.x = element_text(angle=90, colour="black", size=18, family='Times New Roman'),
+            #     axis.text.y = element_text(colour="black", size=18, family='Times New Roman'),
+            #     axis.title.x = element_text(colour= 'black', size=18, family='Times New Roman'),
+            #     axis.title.y = element_text(colour = 'black', size=18, family='Times New Roman'),
+            #     legend.title = element_blank(),
+            #     panel.grid.major.x=element_line(colour="#CCDDEE"),
+            #     legend.text = element_text(colour='black', family = 'Times New Roman', size=22),
+            #     panel.grid = element_blank(), axis.ticks.y = element_line(),
+            #     panel.background = element_rect(fill = 'white', colour = 'white'),
+            #     plot.background = element_rect(fill = 'white', colour = 'white'))
+            # # suppressMessages(ggsave(output, file=figure_to_saved, dpi=700))
+            
+      }
+      else
+      {
+          all_data_same = all_data_same + 1
+      }
+        
+      }, error = function(e) {
+        cat("An error occurred:", conditionMessage(e), "\n")
+        NA
+      })
+  }
+  else
+  {
+      n_counter_less_than_7 = n_counter_less_than_7 + 1
+  }
+
+  rhythmic_data
+}
+```
+
+```{r}
+date_time = "%Y-%m-%dT%H:%M:%OS"
+period_in_hour <- 24
+
+default_value <- -999999999
+dataset <- 'Tiles18' # I explored more datasets than the proposed datasets to understand the robustness of the proposed approach. 'Breast Cancer Dataset'  # 'Tiles18'
+loc_root <- "/Users/wyd2hu/Documents/SA39/Hridita/"
+loc_save_file <- paste(loc_root, 'Findings/Rhythms/', sep='')
+
+if (grepl('Tiles', dataset, fixed=TRUE)){
+  loc_root_data <- paste0(loc_root, 'Data/', dataset, '/fitbit/heart-rate/')
+  file_pattern <- ".csv.gz"
+}else{
+  loc_root_data <- paste0(loc_root, 'Data/', dataset, '/')
+  file_pattern <- '.csv'
+}
+
+if (grepl('fitbit', loc_root_data, fixed=TRUE)){
+    data_name <- 'HeartRatePPG'
+    date_time_format <- "%Y-%m-%dT%H:%M:%OS"
+}else{
+  data_name <- 'Value'
+  date_time_format <- '%m/%d/%Y %I:%M:%S %p'
+
+}
+
+rhythm_df_sheets <- list()
+
+counting_n_p <- 1
+traverse_through_each_file_and_extract_rhythmic_features <- function() 
+{
+    assign("n_counter_less_than_7", 0, envir = .GlobalEnv)
+    assign("not_at_least_4_days", 0, envir = .GlobalEnv)
+    assign("all_data_same", 0, envir = .GlobalEnv)
+
+    print(paste0('DS ', dataset))
+    saving_file <-  paste0(loc_save_file, period_in_hour,'_', dataset, '_', data_name,'.xlsx')
+
+    # Checking whether rhythm is already explored
+    if (file.exists(saving_file))
+    {
+      saved_rhythm_sheets_by_data = excel_sheets(path=saving_file)
+      for (rhythm_sheet in saved_rhythm_sheets_by_data)
+      {
+          rhythm_df_sheets[[rhythm_sheet]] <- read_excel(path = saving_file, sheet = rhythm_sheet)
+      }
+    }
+    else
+    {
+        saved_rhythm_sheets_by_data = c()
+    }
+    
+    for(file in list.files(loc_root_data, pattern = file_pattern))
+    {
+        # if (grepl('1586a0ff-0e95-4b1d-a2bd-97863a02811b', file, fixed=TRUE))
+        # {
+        print(paste0(dataset, ' ',  file, ' nth parti: ', counting_n_p))
+
+        print(length(grep(str_sub(gsub('.csv.gz', '', file), 1, 25), saved_rhythm_sheets_by_data)))
+        if (length(grep(str_sub(gsub('.csv.gz', '', file), 1, 25), saved_rhythm_sheets_by_data)) == 0)
+        {
+            df = fread(paste0(loc_root_data, "//", file))
+            
+            if (grepl('fitbit', loc_root_data, fixed=TRUE)){
+              df$Timestamp <- as.POSIXct(df$Timestamp , format = date_time_format)
+            }
+            else{
+              df$Timestamp <- as.POSIXct(df$Time, format = date_time_format)
+            }
+            
+            df$time_float <- format(strptime(df$Timestamp, format = "%Y-%m-%d %H:%M:%OS"), format = "%H.%M")
+            df$time_float <- as.numeric(df$time_float)
+            
+            df <- na.omit(df[, , drop = FALSE])
+            if (nrow(df) > 1) # the data frame can not be empty
+            {
+                first_row <- head(df, 1)
+                last_row <- tail(df, 1)
+                
+                start_date = first_row$Timestamp[[1]]
+                
+                d_days = as.integer(difftime(last_row$Timestamp[[1]] , start_date, units = "days"))
+                n_times_rhythm_cal = as.integer(d_days / 2)
+
+                if (n_times_rhythm_cal >= 2) # If n_times_rhythm_cal is 2, it will mean that there are data of at least 4 days. Thus, we will be able to use 2 days for baseline and the following 2 days as the window for rhythm change calculation.
+                {
+                    df_cosinor <- data.frame(matrix(ncol = 14, nrow = 1))
+                    colnames(df_cosinor) <- c('start_date', 'end_date', 'data_name', 'p_id', 'mesor', 'amplitude', 'correct_acrophase', 'rhythm_detect_F_ratio', 
+                                              'rhythm_detect_P', 'dominant_period', 'coef_determination',  'baseline_acro', 'baseline_p', 'baseline_dom_period')
+                    print(paste0("N times rhythm calculation ", n_times_rhythm_cal))
+                    
+                    date_time <- as.POSIXct(start_date, format = "%Y-%m-%d %H:%M:%OS")
+                    end_date <- format(date_time + days(1), format = "%Y-%m-%d %H:%M:%OS") # adding 1 day along with the start date so that the total becomes 2 days
+                    # print(paste0('start-end', start_date, ' ',end_date))
+                    rhythmic_data <- extract_rhythmic_features(df=df, start_date = start_date, end_date = end_date, df_cosinor= df_cosinor, bool_save = FALSE, file_name = file, baseline_acro = default_value, baseline_p = default_value, baseline_dom_period = default_value, data_name = data_name)
+                    for(counter in 2:n_times_rhythm_cal) # starting from 2 since first 2 days has already been used for baseline
+                    {
+                        date_time <- as.POSIXct(end_date, format = "%Y-%m-%d %H:%M:%OS")
+                        start_date <- format(date_time + days(1), format = "%Y-%m-%d %H:%M:%OS") # 1 day after the (last) end date should be the start date
+                        end_date <- format(date_time + days(2), format = "%Y-%m-%d %H:%M:%OS") # 2 days after the (last) end date should be the end date. Then, the difference will be 2 days.
+                        rhythmic_data <- extract_rhythmic_features(df=df, start_date = start_date, end_date = end_date, df_cosinor = df_cosinor, bool_save = TRUE, file_name = file, 
+                                                                   baseline_acro = rhythmic_data$acro, baseline_p = rhythmic_data$p, baseline_dom_period = rhythmic_data$dom_period, data_name=data_name)
+                        if(length(rhythmic_data$rhythm_info) > 0)
+                        {
+                          row_number = nrow(df_cosinor) + 1
+                          df_cosinor[row_number, ] <- rhythmic_data$rhythm_info
+                        }
+                        
+                        # Updating the baseline acrophase
+                        rhythmic_data <- extract_rhythmic_features(df = df, start_date = first_row$Timestamp[[1]], end_date = end_date, df_cosinor= df_cosinor, bool_save = FALSE, file_name = file,
+                                                                   baseline_acro = default_value, baseline_p = default_value, baseline_dom_period = default_value, data_name = data_name)
+                    }
+                    rhythm_df_sheets[[str_sub(gsub('.csv.gz', '', file), 1, 25)]] <- df_cosinor
+                }
+                else
+                {
+                    not_at_least_4_days = not_at_least_4_days + 1
+                    print("Less than or equal to 8 days data 😒😒")
+                    print(file)
+                }
+            }
+            else
+            {
+                print("Empty dataframe 😒😒")
+                print(file)
+            }
+        }else
+        {
+            print(paste0('Exists', file))
+        }
+        
+        counting_n_p <- counting_n_p + 1
+        # }
+    }
+    print(saving_file)
+    write_xlsx(rhythm_df_sheets, saving_file) # REMINDER: if you use personalized dominant period, change period_in_hour
+    print(n_counter_less_than_7)
+    print(all_data_same)
+    print(not_at_least_4_days)
+    print('\n\n1 Dataset Done\n\n')
+}
+
+traverse_through_each_file_and_extract_rhythmic_features()
+```
+
+The `echo: false` option disables the printing of code (only output is displayed).
